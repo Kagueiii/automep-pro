@@ -1,0 +1,6 @@
+PyMuPDF>=1.23.21
+Rtree>=1.2.0
+networkx>=3.2.1
+streamlit>=1.32.2
+pydantic>=2.6.4
+Pillow>=10.2.0
