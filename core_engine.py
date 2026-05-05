@@ -126,4 +126,22 @@ class TriagemEspacialLocal:
                         nos_suspeitos.add(id_vizinho)
                         self.grafo.add_edge(id_atual, id_vizinho)
                         
-        return [list(c) for c in nx.connected_components(self.grafo) if nos_suspeitos.intersection(c)]
+        # Pega os agrupamentos brutos
+        clusters_iniciais = [list(c) for c in nx.connected_components(self.grafo) if nos_suspeitos.intersection(c)]
+        
+        # --- INÍCIO DO FILTRO ENTERPRISE (REGRA DO BILHÃO) ---
+        clusters_validados = []
+        
+        for cluster in clusters_iniciais:
+            # Identifica todas as disciplinas (sistemas) presentes neste choque
+            sistemas_presentes = set([self.mapa_componentes[id_c].tipo_sistema for id_c in cluster])
+            
+            # Removemos ruídos visuais genéricos
+            sistemas_reais = {s for s in sistemas_presentes if s not in ["arquitetura_generica", "INDEFINIDO", "TEXTO", "GERAL"]}
+            
+            # A Regra de Ouro: Só consideramos um Hard Clash real se houver 2 ou mais disciplinas DIFERENTES envolvidas.
+            if len(sistemas_reais) >= 2:
+                clusters_validados.append(cluster)
+                
+        return clusters_validados
+        # --- FIM DO FILTRO ENTERPRISE ---
