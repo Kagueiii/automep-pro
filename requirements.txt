@@ -5,3 +5,5 @@ networkx
 Rtree
 google-generativeai
 pydantic
+pip install -r requirements.txt
+pip install fpdf2
