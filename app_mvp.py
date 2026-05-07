@@ -1,10 +1,17 @@
 import streamlit as st
-import fitz  
+import fitz
 import tempfile
 import os
+import hashlib
 import pandas as pd
 import google.generativeai as genai
-from core_engine import IngestorPDFLocal, TriagemEspacialLocal
+import io
+import re
+from fpdf import FPDF
+
+# Importações do nosso motor core (Garantindo quebra de linha)
+from core_engine import IngestorPDFLocal
+from core_engine import TriagemEspacialLocal
 
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="AutoMEP Pro | Engine Espacial", page_icon="🏗️", layout="wide", initial_sidebar_state="expanded")
@@ -22,143 +29,116 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 3. CABEÇALHO
+if "laudo_salvo" not in st.session_state: st.session_state["laudo_salvo"] = None
+if "pdf_hash_atual" not in st.session_state: st.session_state["pdf_hash_atual"] = None
+
+@st.cache_data(show_spinner=False)
+def processar_auditoria(file_id: str, _file_bytes: bytes, sensibilidade: float, disciplina: str):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(_file_bytes)
+        caminho_tmp = tmp.name
+    try:
+        disc_mestra = disciplina if disciplina != "Interdisciplinar" else None
+        ingestor = IngestorPDFLocal()
+        componentes, w, h = ingestor.processar_pdf(caminho_tmp, disciplina_mestra=disc_mestra)
+        motor = TriagemEspacialLocal(limite_conflito_px=sensibilidade)
+        clusters_ricos = motor.executar_triagem(componentes, w, h, disciplina_mestra=disc_mestra)
+        
+        doc = fitz.open(caminho_tmp)
+        pagina = doc.load_page(0)
+        for cluster in clusters_ricos:
+            for id_node in cluster["ids"]:
+                comp = motor.mapa_componentes[id_node]
+                b = comp.bbox_relativo
+                rect = fitz.Rect(b[0]*w, b[1]*h, b[2]*w, b[3]*h)
+                cor = (1, 0, 0) if cluster["status"] == "Crítico" else (1, 0.5, 0)
+                pagina.draw_rect(rect, color=cor, width=2, fill_opacity=0.2)
+        
+        pix = pagina.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("png")
+        doc.close()
+
+        dados_tabela = []
+        for i, c in enumerate(clusters_ricos):
+            dados_tabela.append({
+                "ID do Clash": f"CLASH-{i+1:03d}",
+                "Categoria": c["categoria_conflito"],
+                "Status Técnica": c["status"],
+                "Descrição Técnica": c["descricao_tecnica"]
+            })
+        return img_bytes, dados_tabela, len(componentes), w, h
+    finally:
+        if os.path.exists(caminho_tmp): os.remove(caminho_tmp)
+
 st.markdown('<p class="main-title">🏗️ AutoMEP Pro <sub>v1.0</sub></p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Motor de Triagem Espacial e Detecção de Interferências (Clash Detection)</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">LTS Production Build | Engine Espacial de Precisão</p>', unsafe_allow_html=True)
 
-# 4. BARRA LATERAL
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2933/2933116.png", width=60)
-    st.header("Upload de Prancha")
-    arquivo_pdf = st.file_uploader("Formato suportado: .PDF", type=["pdf"])
-    
+    arquivo_pdf = st.file_uploader("Upload de Prancha (.PDF)", type=["pdf"])
     st.markdown("---")
-    st.subheader("⚙️ Calibragem do Motor")
-    sensibilidade = st.slider("Tolerância de Proximidade (px)", 1.0, 20.0, 5.0, 1.0)
+    sensibilidade = st.slider("Sensibilidade (px)", 0.5, 5.0, 1.0, 0.5)
+    disciplina = st.selectbox("Modo de Auditoria", ["Interdisciplinar", "eletrica", "hidraulica"])
+
+if arquivo_pdf:
+    file_bytes = arquivo_pdf.read()
+    file_id = hashlib.sha256(file_bytes).hexdigest()
+    if st.session_state["pdf_hash_atual"] != file_id:
+        st.session_state["laudo_salvo"] = None
+        st.session_state["pdf_hash_atual"] = file_id
     
-    st.markdown("---")
-    st.subheader("🧠 Cérebro IA (Gemini)")
-    st.caption("Insira sua chave para ativar o Laudo Automático")
-    chave_api = st.text_input("API Key do Google", type="password")
+    with st.spinner("⏳ Triangulando metadados espaciais..."):
+        img_bytes, dados, num_comp, w, h = processar_auditoria(file_id, file_bytes, sensibilidade, disciplina)
+        df = pd.DataFrame(dados)
 
-# 5. LÓGICA PRINCIPAL
-if arquivo_pdf is not None:
-    with st.spinner("⏳ Triangulando coordenadas espaciais..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(arquivo_pdf.read())
-            caminho_tmp = tmp.name
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Componentes", num_comp)
+        m2.metric("Hard Clashes", len(df[df['Categoria'].str.contains('HARD')]))
+        m3.metric("Overlaps", len(df[df['Categoria'].str.contains('OVERLAP')]))
 
-        try:
-            # Roda o Motor
-            ingestor = IngestorPDFLocal()
-            componentes, w, h = ingestor.processar_pdf(caminho_tmp)
-            motor = TriagemEspacialLocal(limite_conflito_px=sensibilidade)
-            clusters = motor.executar_triagem(componentes, w, h)
+        tab1, tab2, tab3 = st.tabs(["🗺️ Mapa Espacial", "📑 Log Técnico", "🤖 Laudo da IA"])
+        with tab1: st.image(img_bytes, use_container_width=True)
+        with tab2: st.dataframe(df, use_container_width=True, hide_index=True)
+        with tab3:
+            def gerar_pdf_bytes(texto):
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", "B", 16)
+                pdf.cell(0, 10, "Relatorio de Compatibilizacao AutoMEP Pro", ln=True, align="C")
+                pdf.set_font("Arial", size=12)
+                t_limpo = re.sub(r'[*#`]+', '', texto).replace('\t', '    ')
+                m_tipografico = {'•': '-', '“': '"', '”': '"', '—': '-', '–': '-'}
+                for k, v in m_tipografico.items(): t_limpo = t_limpo.replace(k, v)
+                f_final = []
+                for linha in t_limpo.split('\n'):
+                    l = linha.lstrip()
+                    f_final.append('\n' + l if 'CLASH-' in l or l.endswith(':') else l)
+                pdf.multi_cell(0, 6, '\n'.join(f_final).encode('latin-1', 'ignore').decode('latin-1'))
+                return pdf.output()
 
-            # Renderiza Quadrados Vermelhos
-            doc = fitz.open(caminho_tmp)
-            pagina = doc.load_page(0)
-            for cluster in clusters:
-                for id_comp in cluster:
-                    comp = motor.mapa_componentes[id_comp]
-                    b = comp.bbox_relativo
-                    rect = fitz.Rect(b[0]*w, b[1]*h, b[2]*w, b[3]*h)
-                    rect.x0 -= 3; rect.y0 -= 3; rect.x1 += 3; rect.y1 += 3
-                    pagina.draw_rect(rect, color=(1, 0, 0), width=2, fill_opacity=0.3, fill=(1, 1, 0))
-            
-            pix = pagina.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("png")
-            doc.close() # Trava de segurança do Windows
-
-            # Tabela de Dados
-            dados_tabela = []
-            for i, cluster in enumerate(clusters):
-                sistemas_env = list(set([motor.mapa_componentes[id_c].tipo_sistema for id_c in cluster]))
-                elementos = [motor.mapa_componentes[id_c].texto_extraido for id_c in cluster]
-                dados_tabela.append({
-                    "ID do Clash": f"CLASH-{i+1:03d}",
-                    "Sistemas": " / ".join(sistemas_env).upper(),
-                    "Elementos Descritos": " | ".join([e for e in elementos if e != "[GEOMETRIA VETORIAL]"]),
-                    "Gravidade": "🔴 Alta", "Status": "Pendente"
-                })
-            df_conflitos = pd.DataFrame(dados_tabela)
-
-            # Dashboard - Topo
-            if len(clusters) == 0:
-                st.success("✅ PROJETO APROVADO: Nenhuma interferência detectada.")
-            else:
-                st.error(f"⚠️ ATENÇÃO: Foram detectadas {len(clusters)} interferências críticas.")
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Componentes Lidos", len(componentes))
-            m2.metric("Tamanho da Prancha", f"{int(w)}x{int(h)}")
-            m3.metric("Hard Clashes", len(clusters))
-            m4.metric("Índice de Risco", f"{min(100, len(clusters)*15)}%")
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Abas
-            tab1, tab2, tab3 = st.tabs(["🗺️ Mapa Espacial", "📑 Relatório de Log", "🤖 Laudo da IA"])
-            
-            with tab1:
-                st.image(img_bytes, use_container_width=True)
-
-            with tab2:
-                if not df_conflitos.empty:
-                    st.dataframe(df_conflitos, use_container_width=True, hide_index=True)
-                    csv = df_conflitos.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Exportar (.CSV)", data=csv, file_name='conflitos.csv', mime='text/csv')
-
-            with tab3:
-                st.subheader("🧠 Assistente Técnico de Engenharia")
-                if len(clusters) > 0:
-                    if not chave_api:
-                        st.warning("⚠️ Insira sua API Key do Google na barra lateral para liberar a geração de laudos.")
-                    
-                    # Botão Mágico
-                    # Botão Mágico
-                    if st.button("✨ Gerar Laudo Automático", disabled=not chave_api):
-                        genai.configure(api_key=chave_api)
-                        
-                        # --- INÍCIO DO CÓDIGO AUTO-DESCOBRIDOR ---
-                        modelo_escolhido = "gemini-pro" # Fallback de segurança
-                        try:
-                            # Pergunta ao Google quais modelos estão liberados para você
-                            for m in genai.list_models():
-                                if 'generateContent' in m.supported_generation_methods:
-                                    modelo_escolhido = m.name
-                                    break # Pega o primeiro modelo válido e foge!
-                        except Exception as e:
-                            st.error(f"Erro ao listar modelos do Google: {e}")
-                            
-                        # Usa o modelo que o próprio Google recomendou
-                        modelo_ia = genai.GenerativeModel(modelo_escolhido)
-                        # --- FIM DO CÓDIGO AUTO-DESCOBRIDOR ---
-                        
-                        for index, linha in df_conflitos.iterrows():
-                            with st.expander(f"Análise: {linha['ID do Clash']}", expanded=True):
-                                with st.spinner(f"IA Redigindo Laudo via {modelo_escolhido}..."):
-                                    prompt_engenharia = f"""
-                                    Você é um Engenheiro Sênior de compatibilização de projetos (BIM/MEP).
-                                    O motor espacial detectou um Hard Clash (Colisão física) entre os seguintes sistemas:
-                                    - Sistemas: {linha['Sistemas']}
-                                    - Elementos identificados: {linha['Elementos Descritos']}
-                                    
-                                    Escreva um laudo técnico curto, direto e profissional contendo:
-                                    1. Risco Principal
-                                    2. Análise do Conflito
-                                    3. Solução Sugerida para a obra.
-                                    Use formatação em Markdown (negrito, tópicos).
-                                    Vá direto ao ponto. Não crie cabeçalhos, não invente datas, IDs ou nomes de projetos.
-                                    """
-                                    try:
-                                        resposta = modelo_ia.generate_content(prompt_engenharia)
-                                        st.markdown(resposta.text)
-                                    except Exception as e:
-                                        st.error(f"Erro na comunicação com a IA: {e}")
-                else:
-                    st.success("Sem alertas para a IA analisar.")
-
-        finally:
-            os.remove(caminho_tmp) 
-else:
-    st.info("👈 Envie sua prancha na barra lateral para começar.")
+            if st.session_state["laudo_salvo"]:
+                st.markdown(st.session_state["laudo_salvo"])
+                st.download_button("📥 Baixar PDF Oficial", data=gerar_pdf_bytes(st.session_state["laudo_salvo"]), file_name="Relatorio_AutoMEP.pdf")
+                if st.button("🧹 Limpar Cache"): 
+                    st.session_state["laudo_salvo"] = None
+                    st.rerun()
+            elif st.button("✨ Gerar Laudo Unificado"):
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                
+                batch_str = ""
+                for _, r in df.head(15).iterrows():
+                    batch_str += f"- **{r['ID do Clash']}** ({r['Categoria']}) | Status: {r['Status Técnica']}\n  - Contexto: {r['Descrição Técnica']}\n"
+                
+                prompt = f"""Você é um Engenheiro Sênior MEP. Analise as interferências detectadas:
+{batch_str}
+PROIBIDO usar tabelas Markdown. Use apenas listas com hifens, negritos simples e subtítulos claros. 
+Forneça Risco, Análise Técnica e Solução para cada item."""
+                
+                res = model.generate_content(prompt, stream=True)
+                def iter_seguro(s):
+                    for chunk in s:
+                        try: yield chunk.text
+                        except ValueError: yield "\n*[Filtro de Segurança]*\n"
+                
+                st.session_state["laudo_salvo"] = st.write_stream(iter_seguro(res))
+                st.rerun()
