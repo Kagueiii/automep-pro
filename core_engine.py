@@ -128,7 +128,9 @@ class TriagemEspacialLocal:
         self.idx_rtree = index.Index(properties=index.Property())
         self.mapa_componentes.clear()
         densidade_global = len(entidades) / 1.0
-        limite_efetivo = 0.5 if disciplina_mestra else self.limite_conflito_px
+        
+        limite_efetivo = self.limite_conflito_px
+        
         for i, ent in enumerate(entidades):
             if ent.tipo_sistema == "arquitetura_generica": continue
             self.mapa_componentes[i] = ent
@@ -141,6 +143,7 @@ class TriagemEspacialLocal:
             vizinhos = list(self.idx_rtree.intersection(bbox_busca))
             densidade_local = len(vizinhos) / 0.0001
             limite_local = limite_efetivo * 0.7 if densidade_local > (3.0 * densidade_global) else limite_efetivo
+            
             for id_vizinho in vizinhos:
                 if id_vizinho != id_atual:
                     comp_v = self.mapa_componentes[id_vizinho]
@@ -157,7 +160,7 @@ class TriagemEspacialLocal:
         regex_circ = r'\b(c|circ|cir|circuito)[.-]?\s*\d+\b'
 
         for cluster in clusters_brutos:
-            c_x0, c_y0, c_x1, c_y1 = 1.0, 1.0, 0.0, 0.0
+            c_x0, c_y0, c_x1, c_y1 = float('inf'), float('inf'), float('-inf'), float('-inf')
             textos, circs, maior_w, tem_txt = [], set(), 0.0, False
             for n in cluster:
                 comp = self.mapa_componentes[n]
@@ -192,5 +195,3 @@ class TriagemEspacialLocal:
             clusters_consolidados.append({"ids": cluster, "status": status, "categoria_conflito": categoria, "descricao_tecnica": desc})
                 
         return clusters_consolidados
-
-# AutoMEP Pro v1.0 - LTS Production Build
